@@ -102,6 +102,20 @@ python3 tools/migrate_from_v1.py --workspace /path/to/your/workspace
 - `config/mnemo.default.json` — 所有开关都在这里
 - 环境变量覆盖：`MNEMO_INJECT__MODE=readonly`（双下划线表示层级）
 
+### Ktao 兼容性说明（原版 vs 本地魔改）
+
+Mnemo 的 `KtaoAdapter` 已兼容两种目录布局：
+
+1. **原版 Ktao 上游仓库**：`src/memory.py`
+2. **本地魔改版（本工作区）**：`skills/memory-system/scripts/memory.py`
+
+注意事项：
+
+- 原版与本地魔改版的核心子命令大体一致（`init/status/capture/consolidate/search/inject` 等可用）。
+- 本地魔改版额外增加了 `preconscious-status` / `preconscious-prune` / `preconscious-export`，这些命令**不在原版中**，请勿在“上游原版”环境直接调用。
+- 如果你的 `memory.py` 在自定义位置，可通过环境变量显式指定：
+  - `MNEMO_KTAO_MEMORY_PY=/abs/path/to/memory.py`
+
 ---
 
 ## 贡献者

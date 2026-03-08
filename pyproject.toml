@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnemo"
+version = "0.1.0"
+description = "Unified memory injector and consume-state toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "roy chen" },
+  { name = "小武" },
+  { name = "书呆子" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["mnemo", "mnemo.injector", "mnemo.consumer", "mnemo.scanner", "mnemo.ranker", "mnemo.adapters", "cli"]

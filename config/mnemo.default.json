@@ -1,0 +1,80 @@
+{
+  "_doc": "Preconscious Buffer P0 config. 所有开关默认可控，后续 P1/P2 可逐项打开。",
+  "schema_version": "2.0.0",
+  "project": "mnemo",
+  "enabled": true,
+  "feature_flags": {
+    "scan": true,
+    "inject_main": false,
+    "inject_urgent": false,
+    "rumination": false,
+    "retrieval_postprocess": false,
+    "access_reinforcement": false,
+    "distill_cursor": true,
+    "followup_state_machine": true,
+    "hash_debounce": true
+  },
+  "scan": {
+    "enabled": true,
+    "source": "memory/layer2/active/facts.jsonl",
+    "batch_size": 300,
+    "dry_run_default": true
+  },
+  "gates": {
+    "cache": {
+      "reject": 0.25,
+      "pass": 0.75
+    },
+    "llm": {
+      "enabled": false,
+      "model": "MiniMax-M2.1",
+      "max_items_per_run": 40
+    }
+  },
+  "scoring": {
+    "formula": "score = importance * exp(-hours/24) + time_bonus",
+    "time_bonus_cap": 0.15,
+    "score_cap": 1.2
+  },
+  "lanes": {
+    "urgent": {
+      "enabled": false,
+      "threshold": 0.9,
+      "ttl_hours": 6,
+      "top_n": 3
+    },
+    "main": {
+      "enabled": false,
+      "threshold": 0.5,
+      "ttl_hours": 48,
+      "top_n": 8
+    }
+  },
+  "followup": {
+    "enabled": true,
+    "max_attempt": 3,
+    "prune_after_hours": 72
+  },
+  "inject": {
+    "enabled": false,
+    "debounce_hash": true,
+    "skip_timestamp_fields": true,
+    "skip_fields": [
+      "timestamp",
+      "ts",
+      "generated_at",
+      "updated_at",
+      "delivered_at"
+    ],
+    "mode": "primary"
+  },
+  "budgets": {
+    "daily_token_budget": 200000,
+    "llm_max_items_per_run": 40
+  },
+  "priority": [
+    "urgent",
+    "preconscious",
+    "snapshot"
+  ]
+}

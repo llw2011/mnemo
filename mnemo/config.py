@@ -125,7 +125,11 @@ def load_config(workspace: Path) -> MnemoConfig:
 
     config_path = workspace / "config" / "mnemo.default.json"
     if not config_path.exists():
-        raise MnemoConfigError(f"Config file not found: {config_path}")
+        alt_path = workspace / "mnemo" / "config" / "mnemo.default.json"
+        if alt_path.exists():
+            config_path = alt_path
+        else:
+            raise MnemoConfigError(f"Config file not found: {config_path}")
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

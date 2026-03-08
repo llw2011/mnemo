@@ -1,4 +1,4 @@
-"""Unified injector main logic."""
+"""Unified injector main logic for Plan B integration."""
 
 from __future__ import annotations
 
@@ -12,11 +12,14 @@ from typing import Any
 
 from mnemo.config import load_config
 from mnemo.consumer.consume_state import UnifiedConsumeState
-from mnemo.injector.block_builder import build_block, render_block
 from mnemo.injector.hash_debounce import HashDebounceStore, canonicalize, compute_hash
 from mnemo.models import InjectResult
 
 logger = logging.getLogger(__name__)
+
+MNEMO_START = "<!-- MNEMO_START -->"
+MNEMO_END = "<!-- MNEMO_END -->"
+UNIFIED_MARKER = "[UNIFIED_MEMORY_BLOCK_V1_DO_NOT_CAPTURE]"
 
 
 def utc_now() -> str:
@@ -34,7 +37,7 @@ def _read_text(path: Path) -> str:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """Write file atomically."""
+    """Write file atomically via .tmp then rename."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -42,82 +45,155 @@ def _atomic_write(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
-def _replace_or_append(content: str, block_id: str, rendered: str) -> str:
-    """Replace existing block by marker or append at end."""
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read JSONL file into a list of dict rows."""
 
-    start = f"<!-- UNIFIED_BLOCK:{block_id}:START -->"
-    end = f"<!-- UNIFIED_BLOCK:{block_id}:END -->"
-    if start in content and end in content:
-        pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
-        return pattern.sub(rendered, content)
-    sep = "\n" if content.endswith("\n") or not content else "\n\n"
-    return f"{content}{sep}{rendered}\n" if content else f"{rendered}\n"
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
 
 
-def _collect_sources(workspace: Path) -> dict[str, str]:
-    """Collect source content for urgent, preconscious, snapshot blocks."""
+def _item_id(row: dict[str, Any], fallback: str) -> str:
+    """Resolve item id from row with fallback."""
 
-    snapshot = _read_text(workspace / "memory" / "layer1" / "snapshot.md").strip() or "（暂无 snapshot）"
+    raw = row.get("id") or row.get("item_id") or fallback
+    return str(raw)
 
-    urgent_rows = _read_text(workspace / "memory" / "urgent-lane" / "queue.jsonl").splitlines()
+
+def _item_text(row: dict[str, Any], item_id: str) -> str:
+    """Build display text for one lane item."""
+
+    score = row.get("score")
+    content = str(row.get("content") or row.get("text") or "").strip()
+    if score is None:
+        return f"- ({item_id}) {content}" if content else f"- ({item_id})"
+    try:
+        score_text = f"{float(score):.3f}"
+    except (TypeError, ValueError):
+        score_text = str(score)
+    if content:
+        return f"- ({item_id}) [score={score_text}] {content}"
+    return f"- ({item_id}) [score={score_text}]"
+
+
+def _collect_lanes(workspace: Path) -> dict[str, Any]:
+    """Collect lane data from urgent/main/snapshot sources."""
+
+    urgent_rows = _read_jsonl(workspace / "memory" / "urgent-lane" / "queue.jsonl")
+    pre_rows = _read_jsonl(workspace / "memory" / "preconscious" / "buffer.jsonl")
+    snapshot = _read_text(workspace / "memory" / "layer1" / "snapshot.md").strip()
+
+    seen_ids: set[str] = set()
+    urgent_lines: list[str] = []
+    pre_lines: list[str] = []
     urgent_ids: list[str] = []
-    for line in urgent_rows:
-        try:
-            obj = json.loads(line)
-            if isinstance(obj, dict) and obj.get("id"):
-                urgent_ids.append(str(obj["id"]))
-        except json.JSONDecodeError:
-            continue
-    urgent = "\n".join([f"- {x}" for x in urgent_ids[:3]]) if urgent_ids else "- （暂无紧急条目）"
-
-    pre_rows = _read_text(workspace / "memory" / "preconscious" / "buffer.jsonl").splitlines()
     pre_ids: list[str] = []
-    for line in pre_rows:
-        try:
-            obj = json.loads(line)
-            if isinstance(obj, dict) and obj.get("id"):
-                pre_ids.append(str(obj["id"]))
-        except json.JSONDecodeError:
-            continue
-    pre = "\n".join([f"- {x}" for x in pre_ids[:8]]) if pre_ids else "- （暂无预意识条目）"
 
-    return {"urgent": urgent, "preconscious": pre, "snapshot": snapshot}
+    for index, row in enumerate(urgent_rows, start=1):
+        item_id = _item_id(row, f"urgent_{index}")
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        urgent_ids.append(item_id)
+        urgent_lines.append(_item_text(row, item_id))
+
+    for index, row in enumerate(pre_rows, start=1):
+        item_id = _item_id(row, f"preconscious_{index}")
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        pre_ids.append(item_id)
+        pre_lines.append(_item_text(row, item_id))
+
+    if not urgent_lines:
+        urgent_lines.append("- （暂无紧急条目）")
+    if not pre_lines:
+        pre_lines.append("- （暂无预意识条目）")
+    if not snapshot:
+        snapshot = "（暂无 snapshot）"
+
+    return {
+        "urgent_lines": urgent_lines,
+        "pre_lines": pre_lines,
+        "snapshot": snapshot,
+        "urgent_ids": urgent_ids,
+        "pre_ids": pre_ids,
+    }
+
+
+def _render_unified_block(collected: dict[str, Any], injected_at: str) -> str:
+    """Render unified MNEMO block content by lane priority."""
+
+    lines: list[str] = [
+        UNIFIED_MARKER,
+        f"generated_at: {injected_at}",
+        "## URGENT_LANE",
+        *collected["urgent_lines"],
+        "",
+        "## PRECONSCIOUS_LANE",
+        *collected["pre_lines"],
+        "",
+        "## SNAPSHOT_LANE",
+        collected["snapshot"],
+    ]
+    return "\n".join(lines).strip()
+
+
+def _replace_or_append_unified_section(memory_content: str, section: str) -> str:
+    """Replace existing MNEMO section or append a new one."""
+
+    block = f"{MNEMO_START}\n{section}\n{MNEMO_END}"
+    if MNEMO_START in memory_content and MNEMO_END in memory_content:
+        pattern = re.compile(re.escape(MNEMO_START) + r".*?" + re.escape(MNEMO_END), re.DOTALL)
+        return pattern.sub(block, memory_content)
+
+    separator = "\n" if not memory_content or memory_content.endswith("\n") else "\n\n"
+    if not memory_content:
+        return block + "\n"
+    return f"{memory_content}{separator}{block}\n"
 
 
 def run_inject(workspace: Path, dry_run: bool = False, mode: str = "primary") -> InjectResult:
-    """Run unified inject with mode control and hash debounce."""
+    """Run unified injection with hash debounce and consume-state writeback."""
 
     config = load_config(workspace)
-    priority = config.priority or ["urgent", "preconscious", "snapshot"]
+    effective_mode = mode or config.inject.mode
+
     memory_path = workspace / "MEMORY.md"
     content_before = _read_text(memory_path)
-    content_after = content_before
+    injected_at = utc_now()
+    collected = _collect_lanes(workspace)
+    section = _render_unified_block(collected, injected_at)
 
     hash_store = HashDebounceStore(workspace)
     consume_state = UnifiedConsumeState(workspace)
-    sources = _collect_sources(workspace)
 
-    changed_blocks: list[str] = []
-    skipped_blocks: list[str] = []
+    normalized = canonicalize({"block_id": "mnemo", "content": section})
+    digest = compute_hash(json.dumps(normalized, ensure_ascii=False, sort_keys=True))
+    old_hash = hash_store.get_hash("mnemo")
 
-    for idx, block_id in enumerate(priority):
-        body = sources.get(block_id, "")
-        block = build_block(block_id=block_id, content=body, priority=idx)
-        rendered = render_block(block)
-        normalized = canonicalize({"block_id": block_id, "text": rendered})
-        digest = compute_hash(json.dumps(normalized, ensure_ascii=False, sort_keys=True))
+    if old_hash == digest:
+        logger.info("inject skipped by hash debounce")
+        return InjectResult(
+            mode=effective_mode,
+            changed_blocks=[],
+            skipped_blocks=["mnemo"],
+            wrote_memory=False,
+            diff="",
+        )
 
-        old_hash = hash_store.get_hash(block_id)
-        if old_hash == digest:
-            skipped_blocks.append(block_id)
-            continue
-
-        changed_blocks.append(block_id)
-        content_after = _replace_or_append(content_after, block_id, rendered)
-        if (not dry_run) and mode != "readonly":
-            hash_store.set_hash(block_id, digest, utc_now(), item_ids=block.item_ids)
-            consume_state.update_block(block_id, utc_now(), digest, consumed_ids={})
-
+    content_after = _replace_or_append_unified_section(content_before, section)
     diff = "\n".join(
         difflib.unified_diff(
             content_before.splitlines(),
@@ -128,13 +204,29 @@ def run_inject(workspace: Path, dry_run: bool = False, mode: str = "primary") ->
         )
     )
 
-    should_write = (not dry_run) and mode in {"primary", "dualwrite"} and content_after != content_before
-    if should_write:
+    should_write_primary = (not dry_run) and effective_mode in {"primary", "dualwrite"}
+    wrote_memory = False
+    if should_write_primary and content_after != content_before:
         _atomic_write(memory_path, content_after)
-    if (not dry_run) and mode == "dualwrite":
+        wrote_memory = True
+
+    if (not dry_run) and effective_mode == "dualwrite":
         _atomic_write(workspace / "MEMORY.shadow.md", content_after)
 
-    logger.info("inject finished mode=%s changed=%s skipped=%s", mode, changed_blocks, skipped_blocks)
+    if (not dry_run) and effective_mode != "readonly":
+        item_ids = collected["urgent_ids"] + collected["pre_ids"]
+        hash_store.set_hash("mnemo", digest, injected_at, item_ids=item_ids)
+        consumed_ids = {
+            item_id: {"status": "injected", "at": injected_at}
+            for item_id in item_ids
+        }
+        consume_state.update_block("mnemo", injected_at, digest, consumed_ids=consumed_ids)
+
+    logger.info("inject finished mode=%s wrote_memory=%s", effective_mode, wrote_memory)
     return InjectResult(
-        mode=mode, changed_blocks=changed_blocks, skipped_blocks=skipped_blocks, wrote_memory=should_write, diff=diff
+        mode=effective_mode,
+        changed_blocks=["mnemo"],
+        skipped_blocks=[],
+        wrote_memory=wrote_memory,
+        diff=diff,
     )
